@@ -92,7 +92,7 @@ fun AccountsScreen(
         Column(modifier = Modifier.fillMaxSize()) {
             ScreenTopBar(title = "账号管理") {
                 TextButton(onClick = { batchLogin() }, enabled = !batchRunning) {
-                    Text(if (batchRunning) "登录中…" else "批量登录")
+                    Text(if (batchRunning) "登录中…" else "批量重新登录")
                 }
             }
 

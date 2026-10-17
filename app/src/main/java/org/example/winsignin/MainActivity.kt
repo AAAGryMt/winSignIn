@@ -66,6 +66,7 @@ private enum class Screen(val topLevel: Boolean) {
     AddAccount(false),
     WebLogin(false),
     Scanner(false),
+    About(false),
 }
 
 private data class NavItem(
@@ -204,7 +205,7 @@ fun AppRoot() {
         scope.launch {
             scanResults = parallelAccounts(enabled, effMinDelay, effMaxDelay) { account ->
                 val r = signQr(account.cookie, account.deviceId, raw)
-                r.success to "${account.displayName}：${r.message}"
+                r.success to netHint("${account.displayName}：${r.message}")
             }
             signing = false
         }
@@ -214,6 +215,11 @@ fun AppRoot() {
     LaunchedEffect(Unit) {
         val probe = accounts.filter { it.cookie.isNotBlank() }
         if (probe.isEmpty()) return@LaunchedEffect
+        // 无网时所有探活都会失败，会被误判成「登录已过期」：跳过检查，只提示网络问题
+        if (!isNetworkAvailable(context)) {
+            snackbarHostState.showSnackbar("网络未连接，已跳过登录检查")
+            return@LaunchedEffect
+        }
 
         var updated = accounts
         var changed = false
@@ -245,13 +251,21 @@ fun AppRoot() {
         }
 
         if (changed) updateAccounts(updated)
-        if (effCheckLoginOnStart && failed.isNotEmpty()) expiredAccounts = failed
+        if (effCheckLoginOnStart && failed.isNotEmpty()) {
+            // 探活中途断网同样会把网络错误误判成过期，此时也不弹过期弹窗
+            if (!isNetworkAvailable(context)) {
+                snackbarHostState.showSnackbar("网络异常，未能确认登录状态，请检查网络连接")
+            } else {
+                expiredAccounts = failed
+            }
+        }
     }
 
     // 系统返回：详情页回各自父页，顶层 Tab 回首页；首页则交给系统退出
     BackHandler(enabled = screen != Screen.Home) {
         screen = when (screen) {
             Screen.AddAccount, Screen.WebLogin -> Screen.Accounts
+            Screen.About -> Screen.Settings
             else -> Screen.Home
         }
     }
@@ -324,6 +338,7 @@ fun AppRoot() {
                         probes = effProbes,
                         demoMode = demoMode,
                         onBack = { screen = Screen.Home },
+                        onOpenScanner = { screen = Screen.Scanner },
                     )
 
                     Screen.Settings -> SettingsScreen(
@@ -369,6 +384,7 @@ fun AppRoot() {
                             demoMode = it
                             prefs.edit().putBoolean(KEY_DEMO_ROLLCALLS, it).apply()
                         },
+                        onOpenAbout = { screen = Screen.About },
                     )
 
                     Screen.Accounts -> AccountsScreen(
@@ -405,6 +421,10 @@ fun AppRoot() {
                     Screen.Scanner -> QrScannerScreen(
                         onResult = { raw -> signAll(raw) },
                         onCancel = { screen = Screen.Home },
+                    )
+
+                    Screen.About -> AboutScreen(
+                        onBack = { screen = Screen.Settings },
                     )
                 }
             }

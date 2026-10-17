@@ -60,7 +60,7 @@ suspend fun reloginAccounts(
                 if (it.id == acc.id) it.copy(cookie = r.cookie, casCookie = r.casCookie) else it
             }
         } else {
-            errors += "${acc.displayName}：${r.message}"
+            errors += netHint("${acc.displayName}：${r.message}")
         }
     }
     return LoginBatch(working, okCount, errors)

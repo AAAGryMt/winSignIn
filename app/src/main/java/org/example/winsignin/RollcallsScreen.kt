@@ -66,6 +66,7 @@ fun RollcallsScreen(
     probes: List<Pair<Double, Double>>,
     demoMode: Boolean,
     onBack: () -> Unit,
+    onOpenScanner: () -> Unit,
 ) {
     val enabled = accounts.filter { it.enabled }
     var loading by remember { mutableStateOf(true) }
@@ -89,7 +90,7 @@ fun RollcallsScreen(
                 if (r.ok) {
                     r.rollcalls.forEach { merged.putIfAbsent(it.id, it) }
                 } else if (firstError == null) {
-                    firstError = "${account.displayName}：${r.message}"
+                    firstError = netHint("${account.displayName}：${r.message}")
                 }
             }
             // 内容没变就不换引用，避免每 10s 全量重组列表
@@ -170,11 +171,12 @@ fun RollcallsScreen(
                         RollcallRow(
                             rollcall = rc,
                             modifier = Modifier.animateItem(),
-                            // 数字点名填密码；雷达点名走设置里的方案；二维码这里不做
+                            // 数字点名填密码；雷达点名走设置里的方案；二维码跳扫码页
                             onClick = {
                                 when {
                                     rc.isNumber && !rc.isRadar -> signTarget = rc
                                     rc.isRadar && !rc.isNumber -> radarTarget = rc
+                                    else -> onOpenScanner()
                                 }
                             },
                         )
@@ -266,7 +268,7 @@ private suspend fun signNumberAll(
     maxSeconds: Int,
 ): List<String> = parallelAccounts(accounts, minSeconds, maxSeconds) { account ->
     val r = signNumber(account.cookie, account.deviceId, rollcall.id, code)
-    "${account.displayName}：${if (r.success) "✅" else "❌"} ${r.message}"
+    netHint("${account.displayName}：${if (r.success) "✅" else "❌"} ${r.message}")
 }
 
 /** 雷达签到：按设置的方案分流。 */
@@ -288,12 +290,12 @@ private suspend fun runRadar(
 
 /** 空请求/坐标请求签完都要回查确认。 */
 private fun radarLine(account: Account, rollcall: Rollcall, sign: SignResult): String {
-    if (!sign.success) return "${account.displayName}：❌ ${sign.message}"
+    if (!sign.success) return netHint("${account.displayName}：❌ ${sign.message}")
     val v = verifySigned(account.cookie, rollcall.id)
     return if (v.ok) {
         "${account.displayName}：✅ 签到成功"
     } else {
-        "${account.displayName}：⚠️ ${v.message}"
+        netHint("${account.displayName}：⚠️ ${v.message}")
     }
 }
 

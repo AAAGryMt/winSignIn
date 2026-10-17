@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -123,7 +124,7 @@ fun AddAccountScreen(
                         if (result.ok) {
                             onLoggedIn(result.cookie, result.casCookie, username, password)
                         } else {
-                            error = result.message
+                            error = netHint(result.message)
                         }
                     }
                 },
@@ -145,6 +146,9 @@ fun AddAccountScreen(
             TextButton(onClick = onUseWebLogin, modifier = Modifier.fillMaxWidth()) {
                 Text("改用网页登录")
             }
+
+            Text("网页登录不支持后续“重新登录”的功能，建议使用上方账号密码登录", modifier = Modifier.fillMaxWidth())
+
         }
     }
 }

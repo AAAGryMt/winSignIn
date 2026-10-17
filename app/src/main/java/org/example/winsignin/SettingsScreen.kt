@@ -11,8 +11,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -59,6 +63,7 @@ fun SettingsScreen(
     onUseCustomChange: (Boolean) -> Unit,
     demoMode: Boolean,
     onDemoModeChange: (Boolean) -> Unit,
+    onOpenAbout: () -> Unit,
 ) {
     // 拖动时先改本地，松手才落盘，别每动一下就写；换设置值/切自定义时重新同步
     var range by remember(minSeconds, maxSeconds) {
@@ -78,7 +83,14 @@ fun SettingsScreen(
 
     val scrollState = rememberScrollState()
     Column(modifier = Modifier.fillMaxSize()) {
-        ScreenTopBar("设置")
+        ScreenTopBar(
+            "设置",
+            actions = {
+                IconButton(onClick = onOpenAbout) {
+                    Icon(Icons.Outlined.Info, contentDescription = "关于")
+                }
+            },
+        )
 
         Box(modifier = Modifier
             .weight(1f)
