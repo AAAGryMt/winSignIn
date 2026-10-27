@@ -9,7 +9,7 @@
 - **UI**：Kotlin + Jetpack Compose（Material 3）
 - **核心逻辑**：Rust（网络 / 登录 / 签到），交叉编译为 `.so`
 - **桥接**：uniffi 0.32，自动生成 Kotlin 绑定
-- **扫码**：CameraX + ML Kit 条码识别（模型打进 APK，不依赖 Google Play 服务）
+- **扫码**：CameraX 取景 + wechat_qrcode（OpenCV 微信扫码引擎，自行交叉编译，见 `native/wechat_qrcode/`）
 - **minSdk** 26 · **targetSdk** 36 · **NDK** 27.0.12077973
 
 ## 目录结构

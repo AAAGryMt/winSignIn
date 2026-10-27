@@ -211,6 +211,11 @@ fun AppRoot() {
         }
     }
 
+    // 提前把扫码引擎的模型加载好，第一次进扫码页就不用等初始化
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { WeChatQrDecoder.init(context) }
+    }
+
     // 启动时并行探活：补名字；失效的先试免密刷新；仍失效且开关开着就弹窗提示
     LaunchedEffect(Unit) {
         val probe = accounts.filter { it.cookie.isNotBlank() }

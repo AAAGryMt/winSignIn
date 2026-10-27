@@ -52,13 +52,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.google.android.gms.tasks.Tasks
-import com.google.mlkit.vision.barcode.BarcodeScanner
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.ZoomSuggestionOptions
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -66,39 +59,26 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
-import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * wechat_qrcode 兜底开关（PoC）。
+ * 解码时的缩放系数，交给 wechat_qrcode 的 `setScaleFactor`。
  *
- * 现在的策略是「ML Kit 为主，WeChat 引擎兜底」，好处是现有体验不会倒退，
- * 同时能在 logcat 里看到 WeChat 引擎能不能救回 ML Kit 漏掉的帧。
- * 实测确认 WeChat 更强之后，可以把这里改成主路径。
+ * - `0`：引擎默认，先把输入缩到约 15 万像素面积再检测（快）
+ * - `1`：不缩放，小码/远距离更清楚，但耗时随面积线性增长
+ *
+ * 远距离扫不到时优先调这个，其次再考虑把分析分辨率提到 1920×1080。
  */
-private const val WECHAT_ENABLED = true
+private const val SCALE_FACTOR = 0f
 
-/** 每隔几帧跑一次 WeChat 兜底（1 = 每帧都跑，最耗电）。 */
-private const val WECHAT_EVERY_N_FRAMES = 2
+/** debug 下每多少帧打一条耗时日志（约 1 秒一条）。 */
+private const val LOG_EVERY_N_FRAMES = 15
 
 /**
- * 0 = 用引擎默认缩放（先把输入缩到约 15 万像素面积，官方默认，快）；
- * 1 = 不缩放（小码/远距离更清楚，但耗时随面积增长）。
- */
-private const val WECHAT_SCALE_FACTOR = 0f
-
-/** 开了 WeChat 就把 ZXing 关掉，避免两个兜底抢同一个分析线程。 */
-private const val ZXING_FALLBACK_ENABLED = false
-
-/**
- * 扫码页：CameraX 出预览，ML Kit 逐帧识别二维码。
+ * 扫码页：CameraX 出预览，wechat_qrcode（OpenCV 微信扫码引擎）逐帧解码。
  *
- * 这里的优化分三层：
- * - P0 输入质量：1280×720 分析流、后台分析线程、离开页面时解绑相机
- * - P1 对准：点击对焦、手电筒、ML Kit 自动变焦、预览/分析统一 16:9
- * - P2 兜底：ML Kit 失败时用 wechat_qrcode（OpenCV 微信扫码引擎）再试一次
+ * 只有这一条识别路径：Y 平面直接进 native，不做 Bitmap、不走 ML Kit。
+ * 相机相关的辅助能力保留：点击对焦、双指缩放、手电筒。
  *
  * @param onResult 识别到第一个二维码时回调一次（原文）。
  * @param onCancel 点返回箭头或系统返回键时回调。
@@ -113,26 +93,12 @@ fun QrScannerScreen(
     val currentOnResult = rememberUpdatedState(onResult)
     val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
 
-    // [PoC] 微信扫码引擎初始化：复制模型 + 建 dnn 检测器，放后台线程做。
-    LaunchedEffect(Unit) {
-        if (WECHAT_ENABLED) {
-            withContext(Dispatchers.IO) { WeChatQrDecoder.init(context) }
-            if (BuildConfig.DEBUG) {
-                Log.d("QrScanner", "wechat decoder ready=${WeChatQrDecoder.isReady}")
-            }
-        }
-    }
-
-    // [P0] 分析不再占用主线程；单线程串行处理，配合 KEEP_ONLY_LATEST 不会堆积。
+    // 分析在单线程串行跑，配合 KEEP_ONLY_LATEST 不会堆积。
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
 
     val handled = remember { AtomicBoolean(false) }
     val disposed = remember { AtomicBoolean(false) }
-    val lastZoomAt = remember { AtomicLong(0L) }
     val frameCounter = remember { AtomicInteger(0) }
-    // ML Kit 连续没解出来的帧数：兜底解码只在连续失败后才启动。
-    val mlKitMissStreak = remember { AtomicInteger(0) }
-    val cameraRef = remember { AtomicReference<Camera?>(null) }
 
     var camera by remember { mutableStateOf<Camera?>(null) }
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
@@ -143,50 +109,25 @@ fun QrScannerScreen(
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var cameraError by remember { mutableStateOf<String?>(null) }
 
-    val scanner: BarcodeScanner = remember {
-        // [P1] 使用 ML Kit 自带的变焦建议：远端二维码太小时自动拉近再试。
-        val zoomCallback = object : ZoomSuggestionOptions.ZoomCallback {
-            override fun setZoom(zoom: Float): Boolean {
-                val cam = cameraRef.get() ?: return false
-                val state = cam.cameraInfo.zoomState.value ?: return false
-                val target = zoom.coerceIn(state.minZoomRatio, state.maxZoomRatio)
-                val now = SystemClock.elapsedRealtime()
-
-                // 250ms 内不重复变焦，避免连续建议导致画面抖动。
-                if (now - lastZoomAt.get() < 250L) return false
-                if (abs(target - state.zoomRatio) < 0.05f) return true
-
-                lastZoomAt.set(now)
-                cam.cameraControl.setZoomRatio(target)
-                if (BuildConfig.DEBUG) {
-                    Log.d("QrScanner", "ML Kit auto zoom -> ${"%.2f".format(target)}x")
-                }
-                return true
-            }
+    // 引擎是单例，第一次进扫码页时才加载模型；之后每帧都直接用。
+    LaunchedEffect(Unit) {
+        if (!WeChatQrDecoder.isReady) {
+            withContext(Dispatchers.IO) { WeChatQrDecoder.init(context) }
         }
-
-        BarcodeScanning.getClient(
-            BarcodeScannerOptions.Builder()
-                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                .setZoomSuggestionOptions(
-                    ZoomSuggestionOptions.Builder(zoomCallback)
-                        .setMaxSupportedZoomRatio(8f)
-                        .build(),
-                )
-                .build(),
-        )
+        if (BuildConfig.DEBUG) {
+            Log.d("QrScanner", "decoder ready=${WeChatQrDecoder.isReady}")
+        }
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            // [P0] 先停分析、解绑相机，再关识别器，避免相机常驻和 ImageProxy 泄漏。
+            // 先停分析、解绑相机，避免相机常驻和 ImageProxy 泄漏。
+            // 解码器是跨页面的单例，这里不释放。
             disposed.set(true)
-            cameraRef.set(null)
             camera?.cameraControl?.enableTorch(false)
             analysisUseCase?.clearAnalyzer()
             cameraProvider?.unbindAll()
             analysisExecutor.shutdown()
-            scanner.close()
         }
     }
 
@@ -210,7 +151,7 @@ fun QrScannerScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            // [P1] 双指缩放：按当前比例乘缩放因子，夹在相机支持的最小/最大倍率之间
+            // 双指缩放：按当前比例乘缩放因子，夹在相机支持的最小/最大倍率之间
             .pointerInput(Unit) {
                 detectTransformGestures { _, _, zoomChange, _ ->
                     val cam = camera ?: return@detectTransformGestures
@@ -220,7 +161,7 @@ fun QrScannerScreen(
                     cam.cameraControl.setZoomRatio(ratio)
                 }
             }
-            // [P1] 点击对焦：同时锁 AF/AE，3 秒后自动恢复
+            // 点击对焦：同时锁 AF/AE，3 秒后自动恢复
             .pointerInput(Unit) {
                 detectTapGestures { offset ->
                     val pv = previewView ?: return@detectTapGestures
@@ -241,7 +182,7 @@ fun QrScannerScreen(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
                 val pv = PreviewView(ctx).apply {
-                    // [P1] 预览和分析统一 16:9，避免“预览里看得到、分析帧里被裁掉”。
+                    // 预览和分析统一 16:9，避免「预览里看得到、分析帧里被裁掉」
                     scaleType = PreviewView.ScaleType.FILL_CENTER
                 }
                 previewView = pv
@@ -266,7 +207,7 @@ fun QrScannerScreen(
                                 .also { it.setSurfaceProvider(pv.surfaceProvider) }
 
                             val analysis = ImageAnalysis.Builder()
-                                // [P0] 显式指定分析流分辨率，避免默认 640×480 导致远距离二维码像素不足。
+                                // 显式指定分析流分辨率，默认的 640×480 对小码太糊
                                 .setResolutionSelector(
                                     ResolutionSelector.Builder()
                                         .setAspectRatioStrategy(
@@ -285,102 +226,49 @@ fun QrScannerScreen(
                             analysisUseCase = analysis
 
                             analysis.setAnalyzer(analysisExecutor) { imageProxy ->
-                                if (disposed.get() || handled.get()) {
+                                if (disposed.get() || handled.get() || !WeChatQrDecoder.isReady) {
                                     imageProxy.close()
                                     return@setAnalyzer
                                 }
                                 try {
                                     val frame = frameCounter.incrementAndGet()
-                                    if (BuildConfig.DEBUG && frame == 1) {
-                                        Log.d(
-                                            "QrScanner",
-                                            "analysis resolution ${imageProxy.width}x${imageProxy.height}",
-                                        )
-                                    }
+                                    val start = SystemClock.elapsedRealtime()
+                                    val result = WeChatQrDecoder.decode(imageProxy, SCALE_FACTOR)
+                                    val cost = SystemClock.elapsedRealtime() - start
 
-                                    val mediaImage = imageProxy.image
-                                    var decoded: String? = null
-                                    var decodedBy = ""
-
-                                    if (mediaImage != null) {
-                                        val input = InputImage.fromMediaImage(
-                                            mediaImage,
-                                            imageProxy.imageInfo.rotationDegrees,
-                                        )
-                                        // 3 秒超时：ML Kit 异常卡住时不要永久占住分析线程。
-                                        val barcodes = Tasks.await(
-                                            scanner.process(input),
-                                            3L,
-                                            TimeUnit.SECONDS,
-                                        )
-                                        // 画面里可能有多个二维码，取面积最大的那个，避免选到背景里的小码。
-                                        decoded = barcodes
-                                            .filter { !it.rawValue.isNullOrBlank() }
-                                            .maxByOrNull { barcode ->
-                                                val box = barcode.boundingBox
-                                                (box?.width() ?: 0) * (box?.height() ?: 0)
-                                            }
-                                            ?.rawValue
-                                        if (!decoded.isNullOrBlank()) decodedBy = "ML Kit"
-                                    }
-
-                                    if (decoded.isNullOrBlank()) {
-                                        val miss = mlKitMissStreak.incrementAndGet()
-
-                                        // [PoC] WeChat 引擎兜底：只在 ML Kit 连续没解出来后、按间隔跑。
-                                        // 它的输入也是 Y 平面，不需要 Bitmap。
-                                        if (WECHAT_ENABLED && WeChatQrDecoder.isReady &&
-                                            miss >= 2 && frame % WECHAT_EVERY_N_FRAMES == 0
-                                        ) {
-                                            val costStart = SystemClock.elapsedRealtime()
-                                            decoded = WeChatQrDecoder.decode(
-                                                imageProxy,
-                                                WECHAT_SCALE_FACTOR,
+                                    if (BuildConfig.DEBUG) {
+                                        if (frame == 1) {
+                                            Log.d(
+                                                "QrScanner",
+                                                "analysis ${imageProxy.width}x${imageProxy.height}",
                                             )
-                                            val cost = SystemClock.elapsedRealtime() - costStart
-                                            if (!decoded.isNullOrBlank()) decodedBy = "WeChat"
-                                            if (BuildConfig.DEBUG) {
-                                                Log.d(
-                                                    "QrScanner",
-                                                    "wechat ${if (decoded.isNullOrBlank()) "miss" else "hit"} ${cost}ms frame $frame",
-                                                )
-                                            }
                                         }
-
-                                        // [P2] ZXing 兜底，默认关掉，和 WeChat 二选一。
-                                        if (decoded.isNullOrBlank() && ZXING_FALLBACK_ENABLED &&
-                                            mediaImage != null && miss >= 3 && frame % 4 == 0
-                                        ) {
-                                            decoded = decodeQrWithZxing(imageProxy)
-                                            if (!decoded.isNullOrBlank()) decodedBy = "ZXing"
+                                        if (frame % LOG_EVERY_N_FRAMES == 1) {
+                                            Log.d(
+                                                "QrScanner",
+                                                "frame $frame ${cost}ms ${if (result.isNullOrBlank()) "miss" else "hit"}",
+                                            )
                                         }
-                                    } else {
-                                        mlKitMissStreak.set(0)
                                     }
 
-                                    val result = decoded?.takeIf { it.isNotBlank() }
-                                    if (result != null &&
-                                        handled.compareAndSet(false, true)
-                                    ) {
+                                    if (!result.isNullOrBlank() && handled.compareAndSet(false, true)) {
                                         if (BuildConfig.DEBUG) {
                                             Log.d(
                                                 "QrScanner",
-                                                "$decodedBy decoded ${result.length} chars at frame $frame",
+                                                "decoded ${result.length} chars at frame $frame",
                                             )
                                         }
                                         mainExecutor.execute {
                                             if (!disposed.get()) currentOnResult.value(result)
                                         }
                                     }
-                                } catch (e: InterruptedException) {
-                                    // 不要重新设置中断标志：analyzer 复用一个 worker 线程，
-                                    // 标志一旦被留下，后续每一帧的 Tasks.await 都会立刻抛
-                                    // InterruptedException，扫码会永久静默失效。
-                                    Thread.interrupted()
-                                } catch (e: Exception) {
+                                } catch (t: Throwable) {
                                     // 单帧失败不终止扫码，继续下一帧。
                                     if (BuildConfig.DEBUG) {
-                                        Log.d("QrScanner", "frame skipped: ${e.javaClass.simpleName}")
+                                        Log.d(
+                                            "QrScanner",
+                                            "frame skipped: ${t.javaClass.simpleName}",
+                                        )
                                     }
                                 } finally {
                                     // 识别成功/失败/异常都必须 close，否则相机不再出帧。
@@ -400,7 +288,6 @@ fun QrScannerScreen(
                                     analysis,
                                 )
                                 camera = boundCamera
-                                cameraRef.set(boundCamera)
                                 hasFlash = boundCamera.cameraInfo.hasFlashUnit()
                                 cameraError = null
                                 if (BuildConfig.DEBUG) {
@@ -421,7 +308,7 @@ fun QrScannerScreen(
             },
         )
 
-        // [P1] 点击对焦的视觉反馈
+        // 点击对焦的视觉反馈
         focusPoint?.let { point ->
             Box(
                 modifier = Modifier
@@ -436,7 +323,7 @@ fun QrScannerScreen(
             )
         }
 
-        // [P1] 手电筒开关
+        // 手电筒开关
         if (hasFlash) {
             IconButton(
                 onClick = { torchOn = !torchOn },

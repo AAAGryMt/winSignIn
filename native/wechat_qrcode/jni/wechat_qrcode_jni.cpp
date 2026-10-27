@@ -102,9 +102,26 @@ Java_org_example_winsignin_WeChatQrDecoder_nativeDecode(
     try {
         std::vector<cv::Mat> points;
         std::vector<std::string> results = g_detector->detectAndDecode(upright, points);
-        for (const auto& text : results) {
-            if (!text.empty()) return env->NewStringUTF(text.c_str());
+
+        // 一屏多码时取面积最大的，避免选中背景里的小码。
+        int best = -1;
+        double best_area = -1.0;
+        for (size_t i = 0; i < results.size(); ++i) {
+            if (results[i].empty()) continue;
+            double area = 0.0;
+            if (i < points.size() && !points[i].empty()) {
+                try {
+                    area = std::abs(cv::contourArea(points[i]));
+                } catch (const cv::Exception&) {
+                    area = 0.0;
+                }
+            }
+            if (area > best_area) {
+                best_area = area;
+                best = static_cast<int>(i);
+            }
         }
+        if (best >= 0) return env->NewStringUTF(results[best].c_str());
     } catch (const std::exception& e) {
         LOGE("decode exception: %s", e.what());
     }

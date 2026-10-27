@@ -43,19 +43,30 @@ cd ../.. && ./gradlew :app:assembleDebug
 `build_opencv.sh` 只编译 `core,imgproc,dnn,objdetect,wechat_qrcode` 五个模块，
 静态链接，不含 Java 绑定/Python/示例，所以比完整 OpenCV 小很多。
 
-## 当前接入方式（PoC）
+## 当前接入方式
 
-`QrScannerScreen.kt` 顶部的常量控制：
+**wechat_qrcode 是唯一的解码器**，ML Kit / ZXing 已全部移除。
+
+`QrScannerScreen.kt` 顶部只有一个可调常量：
 
 | 常量 | 默认 | 含义 |
 |---|---|---|
-| `WECHAT_ENABLED` | `true` | 是否启用 WeChat 兜底 |
-| `WECHAT_EVERY_N_FRAMES` | `2` | 每隔几帧跑一次 |
-| `WECHAT_SCALE_FACTOR` | `0f` | 0=引擎默认（缩到 15 万像素面积），1=不缩放 |
-| `ZXING_FALLBACK_ENABLED` | `false` | 和 WeChat 二选一，默认关 ZXing |
+| `SCALE_FACTOR` | `0f` | 0=引擎默认（缩到约 15 万像素面积再检测），1=不缩放 |
 
-流程：**ML Kit 先解 → 连续 2 帧没解出来 → 每 2 帧交给 WeChat 再试**。
-谁解开就用谁的结果，logcat 里 tag `QrScanner` 会打出命中来源和耗时。
+每帧流程：
+
+```
+CameraX ImageAnalysis(1280x720, KEEP_ONLY_LATEST)
+  → Y 平面（direct ByteBuffer，零拷贝）
+  → cv::rotate（按 rotationDegrees 摆正）
+  → WeChatQRCode::detectAndDecode（CNN 检测 + 超分 + 解码）
+  → 多码时取 boundingBox 面积最大的那个
+  → 回调原文
+```
+
+保留的相机能力：点击对焦（AF/AE + 对焦圈）、双指缩放、手电筒。
+相机释放、分析线程关闭都在 `onDispose` 里；解码器是单例，跨页面复用，
+App 启动时就在后台预热。
 
 ## 怎么验证
 
@@ -66,25 +77,23 @@ adb logcat -s QrScanner
 关键日志：
 
 ```
-wechat decoder ready=true          引擎初始化成功（否则是 false，看 WeChatQr tag）
-analysis resolution 1280x720       实际分析分辨率
-wechat hit 35ms frame 42           WeChat 解出来了，耗时 35ms
-wechat miss 31ms frame 44          WeChat 也没解出来
-ML Kit decoded ... at frame N      ML Kit 的命中
+decoder ready=true              引擎初始化成功（false 就看 WeChatQr tag）
+analysis 1280x720               实际分析分辨率
+frame 16 21ms miss              第 16 帧，解码 21ms，没解出
+frame 31 18ms hit               解出来了
+decoded 46 chars at frame 31    原文长度和命中帧号
 ```
 
 判据：
 
-- **命中率**：`wechat hit` 里有多少是 ML Kit 漏掉的 → 决定兜底有没有价值
-- **耗时**：`wechat hit/miss` 后面的 ms。>80ms 就要考虑降 `scaleFactor` 或降频率
-- **主路径延迟**：`ML Kit decoded ... at frame N` 的 N 有没有明显变大（说明兜底在拖慢主路径）
+- **耗时**：超过 80ms 说明设备偏弱，可以把分析流降到 960×540
+- **命中帧号**：从进入页面到 `decoded` 的帧数，越小越快
 
 ## 调优方向（按性价比）
 
-1. `WECHAT_SCALE_FACTOR`：默认 0 会把 1280×720 缩到约 400×300 再检测。
-   小码扫不到就试 `0.6 ~ 1.0`，代价是耗时按面积增长。
-2. `WECHAT_EVERY_N_FRAMES`：从 2 调到 3 或 4，降低 CPU。
-3. 如果实测 WeChat 明显强于 ML Kit，把主路径反过来（WeChat 先、ML Kit 兜底），
-   ML Kit 的 51MB 依赖就能整个删掉。
-4. 远距离场景更有效的是 ROI：先把中央区域裁出来再送 WeChat，
-   相当于免费放大二维码。
+1. `SCALE_FACTOR`：默认 0 会把 1280×720 缩到约 420×320 再检测。
+   小码扫不到就试 `0.6 ~ 1.0`，代价是耗时按面积线性增长。
+2. 分析流分辨率：`QrScannerScreen.kt` 里的 `Size(1280, 720)`，
+   弱机可以降到 `960×540` 换帧率。
+3. 远距离场景最有效的是 ROI：先把中央区域裁出来再送引擎，
+   相当于免费放大二维码，比调 SCALE_FACTOR 更划算。

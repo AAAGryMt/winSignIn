@@ -19,6 +19,11 @@ android {
         versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // 原生产物（Rust + OpenCV）只有 arm64-v8a，其它 ABI 打进来也用不上
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     buildTypes {
@@ -51,14 +56,11 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     // uniffi 生成的 Kotlin 绑定靠 JNA 调 Rust 的 .so
     implementation("net.java.dev.jna:jna:5.17.0@aar")
-    // 扫码：CameraX 取景 + ML Kit 条码识别（bundled，模型打进 APK，不依赖 Google Play 服务）
+    // 扫码：CameraX 只负责取景出帧，识别交给 wechat_qrcode（native/wechat_qrcode）
     implementation("androidx.camera:camera-core:1.4.2")
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
-    implementation("com.google.mlkit:barcode-scanning:17.3.0")
-    // [P2] ML Kit 没解出来时，用 ZXing 做二维码兜底解码
-    implementation("com.google.zxing:core:3.5.3")
     // 返回箭头等基础图标
     implementation("androidx.compose.material:material-icons-core")
     // 密码显示/隐藏用的 Visibility 图标
