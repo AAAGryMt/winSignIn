@@ -59,7 +59,9 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.ZoomSuggestionOptions
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -70,12 +72,33 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
+ * wechat_qrcode 兜底开关（PoC）。
+ *
+ * 现在的策略是「ML Kit 为主，WeChat 引擎兜底」，好处是现有体验不会倒退，
+ * 同时能在 logcat 里看到 WeChat 引擎能不能救回 ML Kit 漏掉的帧。
+ * 实测确认 WeChat 更强之后，可以把这里改成主路径。
+ */
+private const val WECHAT_ENABLED = true
+
+/** 每隔几帧跑一次 WeChat 兜底（1 = 每帧都跑，最耗电）。 */
+private const val WECHAT_EVERY_N_FRAMES = 2
+
+/**
+ * 0 = 用引擎默认缩放（先把输入缩到约 15 万像素面积，官方默认，快）；
+ * 1 = 不缩放（小码/远距离更清楚，但耗时随面积增长）。
+ */
+private const val WECHAT_SCALE_FACTOR = 0f
+
+/** 开了 WeChat 就把 ZXing 关掉，避免两个兜底抢同一个分析线程。 */
+private const val ZXING_FALLBACK_ENABLED = false
+
+/**
  * 扫码页：CameraX 出预览，ML Kit 逐帧识别二维码。
  *
  * 这里的优化分三层：
  * - P0 输入质量：1280×720 分析流、后台分析线程、离开页面时解绑相机
  * - P1 对准：点击对焦、手电筒、ML Kit 自动变焦、预览/分析统一 16:9
- * - P2 兜底：ML Kit 失败时每 3 帧用 ZXing 再试一次
+ * - P2 兜底：ML Kit 失败时用 wechat_qrcode（OpenCV 微信扫码引擎）再试一次
  *
  * @param onResult 识别到第一个二维码时回调一次（原文）。
  * @param onCancel 点返回箭头或系统返回键时回调。
@@ -89,6 +112,16 @@ fun QrScannerScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val currentOnResult = rememberUpdatedState(onResult)
     val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
+
+    // [PoC] 微信扫码引擎初始化：复制模型 + 建 dnn 检测器，放后台线程做。
+    LaunchedEffect(Unit) {
+        if (WECHAT_ENABLED) {
+            withContext(Dispatchers.IO) { WeChatQrDecoder.init(context) }
+            if (BuildConfig.DEBUG) {
+                Log.d("QrScanner", "wechat decoder ready=${WeChatQrDecoder.isReady}")
+            }
+        }
+    }
 
     // [P0] 分析不再占用主线程；单线程串行处理，配合 KEEP_ONLY_LATEST 不会堆积。
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
@@ -293,10 +326,31 @@ fun QrScannerScreen(
 
                                     if (decoded.isNullOrBlank()) {
                                         val miss = mlKitMissStreak.incrementAndGet()
-                                        // [P2] 兜底解码：读 Y 平面，成本很低，
-                                        // 但仍然只在「ML Kit 连续失败 3 帧」之后、每 4 帧试一次，
-                                        // 避免和 ML Kit 抢同一个分析线程。
-                                        if (mediaImage != null && miss >= 3 && frame % 4 == 0) {
+
+                                        // [PoC] WeChat 引擎兜底：只在 ML Kit 连续没解出来后、按间隔跑。
+                                        // 它的输入也是 Y 平面，不需要 Bitmap。
+                                        if (WECHAT_ENABLED && WeChatQrDecoder.isReady &&
+                                            miss >= 2 && frame % WECHAT_EVERY_N_FRAMES == 0
+                                        ) {
+                                            val costStart = SystemClock.elapsedRealtime()
+                                            decoded = WeChatQrDecoder.decode(
+                                                imageProxy,
+                                                WECHAT_SCALE_FACTOR,
+                                            )
+                                            val cost = SystemClock.elapsedRealtime() - costStart
+                                            if (!decoded.isNullOrBlank()) decodedBy = "WeChat"
+                                            if (BuildConfig.DEBUG) {
+                                                Log.d(
+                                                    "QrScanner",
+                                                    "wechat ${if (decoded.isNullOrBlank()) "miss" else "hit"} ${cost}ms frame $frame",
+                                                )
+                                            }
+                                        }
+
+                                        // [P2] ZXing 兜底，默认关掉，和 WeChat 二选一。
+                                        if (decoded.isNullOrBlank() && ZXING_FALLBACK_ENABLED &&
+                                            mediaImage != null && miss >= 3 && frame % 4 == 0
+                                        ) {
                                             decoded = decodeQrWithZxing(imageProxy)
                                             if (!decoded.isNullOrBlank()) decodedBy = "ZXing"
                                         }

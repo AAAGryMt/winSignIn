@@ -13,6 +13,7 @@ local.properties
 # build artifacts
 /app/release
 /rust/target
+/native/wechat_qrcode/build
 *.so
 *.apk
 
