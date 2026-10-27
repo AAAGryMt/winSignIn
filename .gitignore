@@ -19,3 +19,6 @@ local.properties
 
 # local notes
 sumrise.md
+
+# 签名配置（不要提交）
+/keystore.properties

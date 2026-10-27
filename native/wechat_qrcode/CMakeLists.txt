@@ -13,4 +13,8 @@ add_library(wechatqrcode SHARED jni/wechat_qrcode_jni.cpp)
 target_include_directories(wechatqrcode PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(wechatqrcode PRIVATE ${OpenCV_LIBS} log)
 target_compile_options(wechatqrcode PRIVATE -O2 -ffunction-sections -fdata-sections)
-target_link_options(wechatqrcode PRIVATE -Wl,--gc-sections)
+# 16KB 页对齐：Android 15+ 的部分设备（以及 Play 要求）用 16KB 页，
+# 没这个参数编出来的 .so 在那些机器上会直接 UnsatisfiedLinkError。
+target_link_options(wechatqrcode PRIVATE
+    -Wl,--gc-sections
+    -Wl,-z,max-page-size=16384)
