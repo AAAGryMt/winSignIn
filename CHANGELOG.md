@@ -1,5 +1,73 @@
 # 更新日志
 
+## Unreleased — Rust 逻辑 web 化（后端起底）
+
+> 目标：让 iOS 能用。iOS 只能走浏览器，而浏览器受混合内容、CORS、
+> CAS cookie 三条限制，无法直连学校接口，因此必须有后端代理。
+
+### 新增
+
+- `rust/src/http/mod.rs` — axum 路由、`ServerConfig`、内置冒烟测试页
+- `rust/src/http/handlers.rs` — 12 个接口的 handler（JSON ↔ 现有函数）
+- `rust/src/bin/server.rs` — 服务入口，读 `WINSIGNIN_ADDR` / `WINSIGNIN_STATIC`
+- `rust/README.md` — 接口表、运行方式、部署与安全说明
+
+### 修改
+
+- `rust/Cargo.toml`
+  - 新增 `server` feature（默认关闭），把 `axum` / `tower-http` 设为 optional
+  - `[[bin]] server` 声明 `required-features = ["server"]`，
+    因此 `cargo ndk build --release`（Android）不会把 axum 编进 `.so`
+  - 新增 `serde`（derive）；`tokio` 追加 `net` / `macros` feature
+- `rust/src/lib.rs`
+  - 9 个 `uniffi::Record` 追加 `serde::Serialize`，`GeoPoint` 额外加 `Deserialize`
+  - 新增 `#[cfg(feature = "server")] pub mod http;`
+  - **业务函数一行未改**
+
+### 接口
+
+`POST /api/{login,session/refresh,account,rollcalls,rollcalls/number-code,rollcalls/verify,sign/qr,sign/number,sign/radar,sign/radar/empty,radar/solve}` + `GET /api/health`
+
+返回体直接复用现有 `uniffi::Record`；业务失败走 `ok`/`success` 字段，不用 HTTP 错误码。
+需要 cookie 的接口一律 POST + JSON，避免会话凭据出现在 URL 和日志里。
+
+### 设计说明
+
+- 所有 handler 通过 `tokio::task::spawn_blocking` 调用现有函数。
+  因为 `lib.rs` 内部用 `runtime().block_on(...)` 跑自己的 Runtime，
+  直接在 async handler 里调用会 panic。
+- 后端不持久化密码：登录透传一次，客户端只存 `cookie` / `cas_cookie`。
+- `device_id` / `bfp` 留空时由后端生成。
+
+### 验证（本机已实测）
+
+```text
+cargo check --lib                        → Finished（Android 路径不受影响）
+cargo check --features server --bin server → Finished
+cargo build --features server --bin server → 产出 target/debug/server
+cargo test --lib                         → 21 passed; 0 failed
+```
+
+实际起服务后 curl 验证：
+
+| 请求 | 结果 | 说明 |
+|---|---|---|
+| `GET /api/health` | `{"ok":true,...}` | 服务正常 |
+| `GET /` | 200, 2951 bytes | 内置冒烟测试页 |
+| `POST /api/radar/solve`（真实探测点） | `{"ok":true,"lat":29.5348...,"lon":106.6109...}` | 纯计算路径通 |
+| `POST /api/sign/qr`（合法二维码格式） | `{"success":false,"message":"登录已过期，请重新登录"}` | `qr.rs` 解包成功，请求已发出 |
+| `POST /api/login`（错误账密） | `{"ok":false,"message":"账号或密码不正确"}` | **真实走完 CAS 12 跳链路**，拿到学校返回的错误文案 |
+
+最后一条说明：`cas.rs` 的完整登录链通过 HTTP 层被真实调用并返回了学校侧的业务文案，
+不是 mock。
+
+### 未做
+
+- 没有前端工程（只有一个内置冒烟测试页，供 iOS Safari 验证接口通不通）
+- 没有服务端会话存储 / 账号表：cookie 由客户端持有并在请求里回传
+- 没有 HTTPS 终止配置（部署时交给 Caddy / nginx）
+- `CorsLayer::permissive()` 仅为本地调试，生产需换白名单
+
 ## Unreleased — 扫码管线优化（2026-10-27）
 
 > 当前状态：**代码已修改，尚未构建成功，暂无 APK。**

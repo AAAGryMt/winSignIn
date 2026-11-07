@@ -7,16 +7,32 @@ edition = "2021"
 crate-type = ["cdylib", "lib"]
 name = "winsignin"
 
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+# 只有启用 server feature 才编译这个 bin：
+# `cargo ndk build --release`（Android）不带 feature，因此不会把 axum 编到 .so 里。
+required-features = ["server"]
+
+[features]
+# HTTP 后端（给 Web 前端 / iOS Safari 用）。默认关闭，不影响 Android 构建。
+server = ["dep:axum", "dep:tower-http"]
+
 [dependencies]
 uniffi = { version = "0.32", features = ["cli"] }
 # lms 是明文 http，但登录链要访问金智的 https://ids.cqupt.edu.cn，所以需要 rustls
 # （reqwest 的 rustls-tls 用 ring，交叉编译到 Android 比 aws-lc 省事）
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 url = "2"
 # 登录链要的：AES-128-CBC 加密密码、base64、随机串
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 base64 = "0.22"
 rand = "0.8"
+
+# 以下只在 `--features server` 时编译
+axum = { version = "0.8", optional = true }
+tower-http = { version = "0.7", features = ["cors", "trace", "fs"], optional = true }

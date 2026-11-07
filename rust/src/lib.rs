@@ -5,6 +5,11 @@ mod cas;
 mod qr;
 mod radar;
 
+/// HTTP 层：把下面这些 `uniffi::export` 的纯函数包成 axum 接口，
+/// 供 Web 前端（iOS Safari）调用。只有启用 `server` feature 时才编译。
+#[cfg(feature = "server")]
+pub mod http;
+
 use std::sync::OnceLock;
 
 uniffi::setup_scaffolding!();
@@ -18,7 +23,7 @@ AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/151.0.7922.199 Mobile 
 TronClass/common";
 
 /// 签到结果。[distance] 只在雷达签到被判"太远"时返回，单位米（服务器算的）。
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, serde::Serialize)]
 pub struct SignResult {
     pub success: bool,
     pub message: String,
@@ -26,7 +31,7 @@ pub struct SignResult {
 }
 
 /// 从点名里直接读出的数字签到码。
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, serde::Serialize)]
 pub struct NumberCodeResult {
     pub ok: bool,
     pub message: String,
@@ -34,7 +39,7 @@ pub struct NumberCodeResult {
 }
 
 /// 签到后回查的确认结果。[status] 是服务器给的本人状态。
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, serde::Serialize)]
 pub struct VerifyResult {
     pub ok: bool,
     pub message: String,
@@ -42,14 +47,14 @@ pub struct VerifyResult {
 }
 
 /// 一个经纬度点（雷达三边定位的探测点）。
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct GeoPoint {
     pub lat: f64,
     pub lon: f64,
 }
 
 /// 三边定位算出的目标点。
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, serde::Serialize)]
 pub struct RadarTarget {
     pub ok: bool,
     pub message: String,
@@ -59,7 +64,7 @@ pub struct RadarTarget {
 
 /// 自动登录结果。成功时 cookie 是 lms 域下的会话串，
 /// cas_cookie 是 CAS 域 cookie（CASTGC 等），由调用方按账号持久化。
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, serde::Serialize)]
 pub struct LoginResult {
     pub ok: bool,
     pub message: String,
@@ -68,7 +73,7 @@ pub struct LoginResult {
 }
 
 /// 当前账号信息。拿不到时 ok=false，message 里是原因。
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, serde::Serialize)]
 pub struct AccountInfo {
     pub ok: bool,
     pub message: String,
@@ -77,7 +82,7 @@ pub struct AccountInfo {
 }
 
 /// 一条点名记录（只取界面要用的字段）。
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, serde::Serialize)]
 pub struct Rollcall {
     pub id: String,
     pub course_title: String,
@@ -90,7 +95,7 @@ pub struct Rollcall {
 }
 
 /// 点名列表结果。
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, serde::Serialize)]
 pub struct RollcallsResult {
     pub ok: bool,
     pub message: String,
